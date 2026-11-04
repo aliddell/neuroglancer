@@ -19,14 +19,9 @@ import type {
   CodecArrayLayoutInfo,
 } from "#src/datasource/zarr/codec/index.js";
 import { CodecKind } from "#src/datasource/zarr/codec/index.js";
+import { parseJpegConfiguration } from "#src/datasource/zarr/codec/jpeg/config.js";
 import { registerCodec } from "#src/datasource/zarr/codec/resolve.js";
 import { DataType } from "#src/util/data_type.js";
-import {
-  verifyInt,
-  verifyObject,
-  verifyObjectProperty,
-  verifyOptionalObjectProperty,
-} from "#src/util/json.js";
 
 export interface Configuration {
   width: number;
@@ -34,20 +29,7 @@ export interface Configuration {
   numComponents: 1 | 3;
 }
 
-const COLOR_SPACES = ["grayscale", "ycbcr", "rgb"];
-
-function verifyColorSpace(x: unknown): string {
-  if (typeof x !== "string" || !COLOR_SPACES.includes(x)) {
-    throw new Error(`jpeg: invalid color space ${JSON.stringify(x)}`);
-  }
-  return x;
-}
-
-/**
- * The `jpeg` codec of zarr-extensions PR #66 (at fc04227). Only the chunk
- * shape matters for decoding; the stream records the color transform and the
- * subsampling. Decoding to YCbCr samples is not supported.
- */
+/** The zarr-extensions `jpeg` codec; see config.ts for the rules. */
 registerCodec({
   name: "jpeg",
   kind: CodecKind.arrayToBytes,
@@ -55,35 +37,8 @@ registerCodec({
     configuration: unknown,
     decodedArrayInfo: CodecArrayInfo,
   ): { configuration: Configuration } {
-    verifyObject(configuration);
-    verifyObjectProperty(configuration, "quality", (x) => {
-      const q = verifyInt(x);
-      if (q < 0 || q > 100) throw new Error(`jpeg: invalid quality ${q}`);
-      return q;
-    });
-    const encoded = verifyObjectProperty(
-      configuration,
-      "encoded_color_space",
-      verifyColorSpace,
-    );
-    const decoded = verifyOptionalObjectProperty(
-      configuration,
-      "decoded_color_space",
-      verifyColorSpace,
-      encoded === "grayscale" ? "grayscale" : "rgb",
-    );
-    verifyObjectProperty(configuration, "subsampling", (x) => {
-      if (!Array.isArray(x)) {
-        throw new Error(`jpeg: invalid subsampling ${JSON.stringify(x)}`);
-      }
-      return x;
-    });
-    if (decoded === "ycbcr") {
-      throw new Error("jpeg: decoding to ycbcr samples is not supported");
-    }
-    if ((encoded === "grayscale") !== (decoded === "grayscale")) {
-      throw new Error(`jpeg: cannot decode ${encoded} as ${decoded}`);
-    }
+    const { encodedColorSpace, numComponents: configured } =
+      parseJpegConfiguration(configuration);
 
     const { dataType, chunkShape } = decodedArrayInfo;
     if (dataType !== DataType.UINT8) {
@@ -101,9 +56,9 @@ registerCodec({
         `jpeg: chunk shape must be (H, W), (H, W, 1) or (H, W, 3), but received [${chunkShape}]`,
       );
     }
-    if ((numComponents === 1) !== (encoded === "grayscale")) {
+    if (numComponents !== configured) {
       throw new Error(
-        `jpeg: ${encoded} does not match ${numComponents} component(s)`,
+        `jpeg: ${encodedColorSpace} does not match ${numComponents} component(s)`,
       );
     }
     const [height, width] = chunkShape;
